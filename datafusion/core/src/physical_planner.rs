@@ -2936,16 +2936,29 @@ impl DefaultPhysicalPlanner {
         subqueries: Vec<Subquery>,
         session_state: &SessionState,
     ) -> Result<(Vec<ScalarSubqueryLink>, DFHashMap<Subquery, SubqueryIndex>)> {
-        let mut links = Vec::with_capacity(subqueries.len());
-        let mut index_map = DFHashMap::with_capacity(subqueries.len());
+        let mut unique_subqueries = Vec::with_capacity(subqueries.len());
+
         for sq in subqueries {
             // Callers deduplicate, but guard against accidental double-planning.
-            if index_map.contains_key(&sq) {
-                continue;
+            if !unique_subqueries.contains(&sq) {
+                unique_subqueries.push(sq);
             }
-            let physical_plan = self
-                .create_initial_plan(&sq.subquery, session_state)
-                .await?;
+        }
+
+        // Scalar subqueries at the same plan level are independent of each
+        // other, so plan them concurrently. `try_join_all` preserves input
+        // order, which keeps `SubqueryIndex` assignment deterministic.
+        let physical_plans = futures::future::try_join_all(
+            unique_subqueries
+                .iter()
+                .map(|sq| self.create_initial_plan(&sq.subquery, session_state)),
+        )
+        .await?;
+
+        let mut links = Vec::with_capacity(unique_subqueries.len());
+        let mut index_map = DFHashMap::with_capacity(unique_subqueries.len());
+
+        for (sq, physical_plan) in unique_subqueries.into_iter().zip(physical_plans) {
             let index = SubqueryIndex::new(links.len());
             links.push(ScalarSubqueryLink {
                 plan: physical_plan,
@@ -2953,6 +2966,7 @@ impl DefaultPhysicalPlanner {
             });
             index_map.insert(sq, index);
         }
+
         Ok((links, index_map))
     }
 
