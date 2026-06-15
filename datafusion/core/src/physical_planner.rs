@@ -391,7 +391,7 @@ impl DefaultPhysicalPlanner {
     fn collect_scalar_subqueries(plan: &LogicalPlan) -> Vec<Subquery> {
         let mut subqueries = IndexSet::new();
         plan.apply(|node| {
-            for expr in node.expressions() {
+            node.apply_expressions(|expr| {
                 expr.apply(|e| {
                     if let Expr::ScalarSubquery(sq) = e
                         && sq.outer_ref_columns.is_empty()
@@ -400,9 +400,7 @@ impl DefaultPhysicalPlanner {
                     }
                     Ok(TreeNodeRecursion::Continue)
                 })
-                .expect("infallible");
-            }
-            Ok(TreeNodeRecursion::Continue)
+            })
         })
         .expect("infallible");
         subqueries.into_iter().collect()
@@ -436,15 +434,15 @@ impl DefaultPhysicalPlanner {
     ) -> futures::future::BoxFuture<'a, Result<Arc<dyn ExecutionPlan>>> {
         Box::pin(async move {
             let all_subqueries = Self::collect_scalar_subqueries(logical_plan);
-            let (links, index_map) = self
-                .plan_scalar_subqueries(all_subqueries, session_state)
-                .await?;
-
-            if links.is_empty() {
+            if all_subqueries.is_empty() {
                 return self
                     .create_initial_plan_inner(logical_plan, session_state)
                     .await;
             }
+
+            let (links, index_map) = self
+                .plan_scalar_subqueries(all_subqueries, session_state)
+                .await?;
 
             // Create the shared `ScalarSubqueryResults` container and register
             // it in `ExecutionProps` so that `create_physical_expr` can resolve
